@@ -24,7 +24,7 @@
                            :threads connection-threads
                            :insecure? false}
               conn-manager (clj-http.conn-mgr/make-reusable-conn-manager conn-params)]
-          (logf :info "Initializing ElasticSearch connection to %s..." url)
+          (logf :info "Initializing ElasticSearch connection to %s..." es-conn-str)
           (esr/connect es-conn-str {:connection-manager conn-manager
                                     :conn-timeout pool-request-timeout
                                     :socket-timeout pool-request-timeout})))
