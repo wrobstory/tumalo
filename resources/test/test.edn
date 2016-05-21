@@ -1,0 +1,6 @@
+{:elasticsearch {:host "localhost"           ; ES host
+                 :port 9200                  ; ES port
+                 :pool-connection-timeout 60 ; HTTP connection timeout, in seconds
+                 :pool-request-timeout 3000  ; HTTP request timeout, in milliseconds
+                 :connection-threads 4       ; Number of threads for conn pool to use
+                 }}
