@@ -6,7 +6,9 @@
                  [org.clojure/tools.logging "0.3.1"]
                  [clojurewerkz/elastisch "2.2.1"]
                  [prismatic/schema "1.1.1"]
-                 [clj-http "2.2.0"]]
+                 [clj-http "2.2.0"]
+                 [clj-time "0.11.0"]]
   :resource-paths ["resources"]
-  :profiles {:dev {:resource-paths ["resources/test"]}}
+  :profiles {:dev {:resource-paths ["resources/test"]}
+             :uberjar {:aot :all}}
   :global-vars {*warn-on-reflection* true})
