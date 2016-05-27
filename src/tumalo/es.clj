@@ -34,7 +34,7 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Bulk Reads
 
-(s/defn get-lazy-doc-seq
+(s/defn get-lazy-doc-seq :- (s/if vector? [] clojure.lang.LazySeq)
   "Get a lazy-seq of docs from the ES `index` and `mapping-type` for the given `query`.
 
   The scroll query will be kept open for `scroll-duration`, which defaults to 1m."
@@ -65,7 +65,8 @@
    {_index: index_1 _type: type_mapping_1 field_1: baz field_2: qux}
    {_index: index_1 _type: type_mapping_1 field_1: fizz field_2: buzz}
 
-   The only contract for `f` is that it returns a sequence of docs with the _index and _type fields.
+   The only contract for `f` is that it returns a sequence of maps with the _index and _type fields intact. The
+   :_id field will be made available, but can be changed or left intact.
 
    `batch-size` dictates the size of the bulk batches."
   ([pool source-index-name source-mapping-type target-index-name target-mapping-type batch-size]
@@ -82,7 +83,8 @@
                                           source-mapping-type
                                           {:match_all {}})
          get-source-&-assign-target #(merge (:_source %) {:_index target-index-name
-                                                          :_type target-mapping-type})
+                                                          :_type target-mapping-type
+                                                          :_id (:_id %)})
          assigned-target-index-and-type (map get-source-&-assign-target source-idx-seq)
          source-seq-user-fn-applied (f assigned-target-index-and-type)
          partitioned-docs (partition-all batch-size source-seq-user-fn-applied)]
