@@ -135,10 +135,21 @@
 
 (s/defn index-from-s3
   [pool :- Connection
-    bucket-name :- s/Str
-    prefix :- s/Str
-    target-index-name :- s/Str
-    target-mapping-type :- s/Str
-    batch-size :- s/Num
-    f]
-    (let [s3-chan (chan 10)]))
+   bucket-name :- s/Str
+   prefix :- s/Str
+   target-index-name :- s/Str
+   target-mapping-type :- s/Str
+   es-batch-size :- s/Num
+   s3-batch-size :- s/Num
+   f]
+    (let [s3-chan (chan 10)
+          s3-first-batch (s3/list-objects :bucket-name bucket-name
+                                          :prefix prefix
+                                          :max-keys s3-batch-size)]
+      (thread (get-next-s3-object-batch! s3-first-batch))
+      (loop [bulk-batch (<!! s3-chan)]
+        (if bulk-batch
+          (do
+            (bulk-write-seq pool target-index-name target-mapping-type bulk-batch es-batch-size)
+            (recur (<!! s3-chan)))
+          (log :info "Finished processing data!")))))
