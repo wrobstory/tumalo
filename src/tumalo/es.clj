@@ -1,12 +1,15 @@
 (ns tumalo.es
   (:require [clojure.tools.logging :refer [log logf]]
+            [clojure.core.async :refer [chan thread close! >!! <!!]]
+            [amazonica.aws.s3 :as s3]
             [clojurewerkz.elastisch.rest.bulk :as esb]
             [clojurewerkz.elastisch.rest.document :as esd]
             [clojurewerkz.elastisch.rest :as esr]
             [schema.core :as s]
             [tumalo.schemas :as ts])
   (:import [java.util HashMap]
-           [clojurewerkz.elastisch.rest Connection]))
+           [clojurewerkz.elastisch.rest Connection]
+           [clojure.core.async.impl.channels ManyToManyChannel]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Connections
@@ -52,6 +55,23 @@
      (esd/scroll-seq pool first-resp))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Bulk Writes
+
+(s/defn bulk-write-seq
+  "Given a sequence of documents prepared for bulk indexing, e.g. they contain :_index,
+  :_type, and :_id, partition the sequence into `batch-size` batches and bulk write to ES"
+  [pool :- Connection
+   target-index-name :- s/Str
+   target-mapping-type :- s/Str
+   docs :- [{s/Keyword s/Any}]
+   batch-size :- s/Num]
+  (let [partitioned-docs (partition-all batch-size docs)]
+    (doseq [doc-batch partitioned-docs
+            :let [bulk-batch (esb/bulk-index doc-batch)]]
+      (esb/bulk-with-index-and-type pool target-index-name target-mapping-type bulk-batch))))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Reindexing
 
 
@@ -65,7 +85,7 @@
    {_index: index_1 _type: type_mapping_1 field_1: baz field_2: qux}
    {_index: index_1 _type: type_mapping_1 field_1: fizz field_2: buzz}
 
-   The only contract for `f` is that it returns a sequence of maps with the _index and _type fields intact. The
+   The only contract for `f` is that it returns a seq of maps with the _index and _type fields intact. The
    :_id field will be made available, but can be changed or left intact.
 
    `batch-size` dictates the size of the bulk batches."
@@ -86,8 +106,53 @@
                                                           :_type target-mapping-type
                                                           :_id (:_id %)})
          assigned-target-index-and-type (map get-source-&-assign-target source-idx-seq)
-         source-seq-user-fn-applied (f assigned-target-index-and-type)
-         partitioned-docs (partition-all batch-size source-seq-user-fn-applied)]
-     (doseq [doc-batch partitioned-docs
-             :let [bulk-batch (esb/bulk-create doc-batch)]]
-       (esb/bulk-with-index-and-type pool target-index-name target-mapping-type bulk-batch)))))
+         source-seq-user-fn-applied (f assigned-target-index-and-type)]
+     (bulk-write-seq pool target-index-name target-mapping-type source-seq-user-fn-applied batch-size))))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Indexing from S3
+
+(s/defn get-next-s3-object-batch!
+  "Get next batch of S3 objects and put them on the `chan`"
+  [s3-chan :- ManyToManyChannel
+   last-object-batch :- {s/Keyword s/Any}
+   processing-fn]
+  (logf :info "Fetching next batch of %s objects from %s"
+        (:max-keys last-object-batch) (:bucket-name last-object-batch))
+  (let [object-summaries (:object-summaries last-object-batch)
+        object-reducer #(concat %1 (processing-fn (s3/get-object (:bucket-name %2) (:key %2))))
+        processed-objects (reduce object-reducer [] object-summaries)]
+    (log :info "S3 Objects fetched, putting on channel to ES writer!")
+    (>!! s3-chan processed-objects)
+    (if (:truncated? last-object-batch)
+      (get-next-s3-object-batch! s3-chan
+                                 (s3/list-next-batch-of-objects last-object-batch)
+                                 processing-fn)
+      (do
+        (log :info "Finished fetching S3 data! Closing channel.")
+        (close! s3-chan)))))
+
+(s/defn index-from-s3
+  [pool :- Connection
+   bucket-name :- s/Str
+   prefix :- s/Str
+   target-index-name :- s/Str
+   target-mapping-type :- s/Str
+   es-batch-size :- s/Num
+   s3-batch-size :- s/Num
+   f]
+  (let [s3-chan (chan 10)
+        s3-first-batch (s3/list-objects :bucket-name bucket-name
+                                        :prefix prefix
+                                        :max-keys s3-batch-size)]
+    (thread (get-next-s3-object-batch! s3-chan s3-first-batch f))
+    (loop [bulk-batch (<!! s3-chan)]
+      (if bulk-batch
+        (do
+          (logf :info "Writing batch to mapping %s for index %s"
+                target-mapping-type
+                target-index-name)
+          (bulk-write-seq pool target-index-name target-mapping-type bulk-batch es-batch-size)
+          (recur (<!! s3-chan)))
+        (log :info "Finished processing data!")))))
