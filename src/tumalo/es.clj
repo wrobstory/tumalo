@@ -67,7 +67,7 @@
    batch-size :- s/Num]
   (let [partitioned-docs (partition-all batch-size docs)]
     (doseq [doc-batch partitioned-docs
-            :let [bulk-batch (esb/bulk-create doc-batch)]]
+            :let [bulk-batch (esb/bulk-index doc-batch)]]
       (esb/bulk-with-index-and-type pool target-index-name target-mapping-type bulk-batch))))
 
 
@@ -121,7 +121,7 @@
   (logf :info "Fetching next batch of %s objects from %s"
         (:max-keys last-object-batch) (:bucket-name last-object-batch))
   (let [object-summaries (:object-summaries last-object-batch)
-        object-reducer #(conj %1 (processing-fn (s3/get-object (:bucket-name %2) (:key %2))))
+        object-reducer #(concat %1 (processing-fn (s3/get-object (:bucket-name %2) (:key %2))))
         processed-objects (reduce object-reducer [] object-summaries)]
     (log :info "S3 Objects fetched, putting on channel to ES writer!")
     (>!! s3-chan processed-objects)
@@ -142,14 +142,17 @@
    es-batch-size :- s/Num
    s3-batch-size :- s/Num
    f]
-    (let [s3-chan (chan 10)
-          s3-first-batch (s3/list-objects :bucket-name bucket-name
-                                          :prefix prefix
-                                          :max-keys s3-batch-size)]
-      (thread (get-next-s3-object-batch! s3-first-batch))
-      (loop [bulk-batch (<!! s3-chan)]
-        (if bulk-batch
-          (do
-            (bulk-write-seq pool target-index-name target-mapping-type bulk-batch es-batch-size)
-            (recur (<!! s3-chan)))
-          (log :info "Finished processing data!")))))
+  (let [s3-chan (chan 10)
+        s3-first-batch (s3/list-objects :bucket-name bucket-name
+                                        :prefix prefix
+                                        :max-keys s3-batch-size)]
+    (thread (get-next-s3-object-batch! s3-chan s3-first-batch f))
+    (loop [bulk-batch (<!! s3-chan)]
+      (if bulk-batch
+        (do
+          (logf :info "Writing batch to mapping %s for index %s"
+                target-mapping-type
+                target-index-name)
+          (bulk-write-seq pool target-index-name target-mapping-type bulk-batch es-batch-size)
+          (recur (<!! s3-chan)))
+        (log :info "Finished processing data!")))))
