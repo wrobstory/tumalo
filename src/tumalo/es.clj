@@ -113,6 +113,16 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Indexing from S3
 
+(defn reduce-objects-and-streams
+  "Reducer: get the S3 object, process it, concat the returned values and streams to the :values and
+  :streams sequences in the accumulating map"
+  [processing-fn accum s3-object]
+  (let [s3-object (s3/get-object (:bucket-name s3-object) (:key s3-object))
+        processed-obj-and-streams (processing-fn s3-object)]
+    {:values  (concat (:values accum) (:values processed-obj-and-streams))
+     :streams (concat (:streams accum) (:streams processed-obj-and-streams))}))
+
+
 (s/defn get-next-s3-object-batch!
   "Get next batch of S3 objects and put them on the `chan`"
   [s3-chan :- ManyToManyChannel
@@ -121,8 +131,8 @@
   (logf :info "Fetching next batch of %s objects from %s"
         (:max-keys last-object-batch) (:bucket-name last-object-batch))
   (let [object-summaries (:object-summaries last-object-batch)
-        object-reducer #(concat %1 (processing-fn (s3/get-object (:bucket-name %2) (:key %2))))
-        processed-objects (reduce object-reducer [] object-summaries)]
+        reducer (partial reduce-objects-and-streams processing-fn)
+        processed-objects (reduce reducer [] object-summaries)]
     (log :info "S3 Objects fetched, putting on channel to ES writer!")
     (>!! s3-chan processed-objects)
     (if (:truncated? last-object-batch)
@@ -147,12 +157,17 @@
                                         :prefix prefix
                                         :max-keys s3-batch-size)]
     (thread (get-next-s3-object-batch! s3-chan s3-first-batch f))
-    (loop [bulk-batch (<!! s3-chan)]
-      (if bulk-batch
-        (do
-          (logf :info "Writing batch to mapping %s for index %s"
-                target-mapping-type
-                target-index-name)
-          (bulk-write-seq pool target-index-name target-mapping-type bulk-batch es-batch-size)
-          (recur (<!! s3-chan)))
-        (log :info "Finished processing data!")))))
+    (loop [batches-and-streams (<!! s3-chan)]
+      (let [bulk-batch (:values batches-and-streams)
+            streams (:streams batches-and-streams)]
+        (if bulk-batch
+          (do
+            (logf :info "Writing batch to mapping %s for index %s"
+                  target-mapping-type
+                  target-index-name)
+            (bulk-write-seq pool target-index-name target-mapping-type bulk-batch es-batch-size)
+            (log :info "Closing S3 streams for batch...")
+            (doseq [stream streams]
+              (.close stream))
+            (recur (<!! s3-chan)))
+          (log :info "Finished processing data!"))))))

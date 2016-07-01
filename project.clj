@@ -1,4 +1,4 @@
-(defproject tumalo "0.1.0-SNAPSHOT"
+(defproject tumalo "0.2.0"
   :description "Clojure Elasticsearch Indexing Tools"
   :license {:name "MIT"
             :url "https://opensource.org/licenses/MIT"}
