@@ -14,5 +14,4 @@
   :resource-paths ["resources"]
   :profiles {:dev {:resource-paths ["resources/test"]}
              :uberjar {:aot :all}}
-  :global-vars {*warn-on-reflection* true}
-  :javac-options ["-target" "1.8" "-source" "1.8"])
+  :global-vars {*warn-on-reflection* true})
